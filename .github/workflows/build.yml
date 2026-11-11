@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pyinstaller==6.11.1 pyinstaller-hooks-contrib "pywebview>=5.1,<6"
+      - run: pip install pyinstaller==6.11.1 pyinstaller-hooks-contrib "pywebview>=5.1,<6" certifi
       - name: Build
         run: |
           pyinstaller --noconfirm --onefile --windowed --name "Rojo Launcher" --icon icon.ico --splash splash.png rojo_launcher.py
@@ -79,7 +79,7 @@ jobs:
           "$PY" -m venv venv
           venv/bin/pip install -q pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.10 pywebview==5.4 \
             pyobjc-core==13.0 pyobjc-framework-Cocoa==13.0 pyobjc-framework-Quartz==13.0 \
-            pyobjc-framework-WebKit==13.0 pyobjc-framework-Security==13.0 dmgbuild==1.6.7
+            pyobjc-framework-WebKit==13.0 pyobjc-framework-Security==13.0 dmgbuild==1.6.7 certifi
           lipo -archs "$(venv/bin/python -c 'import sys, os; print(os.path.realpath(sys.executable))')"
 
       - name: Icon
@@ -112,8 +112,10 @@ jobs:
           du -sh "$APP"
           ditto -c -k --sequesterRsrc --keepParent "$APP" RojoLauncher-Mac.zip
 
-      - name: "Test: starts on Apple Silicon and on Intel (Rosetta)"
+      - name: "Test: starts on Apple Silicon and on Intel (Rosetta), and reaches GitHub over HTTPS"
         run: |
+          # A normal Mac has no python.org certificate folder: hide it so the app must use its own.
+          sudo mv /Library/Frameworks/Python.framework/Versions/3.12/etc/openssl /Library/Frameworks/Python.framework/Versions/3.12/etc/openssl-hidden 2>/dev/null || true
           boot() {
             rm -f ~/.rojo-launcher/server.json
             ROJO_LAUNCHER_HEADLESS=1 $1 "$APP/Contents/MacOS/Rojo Launcher" > boot.log 2>&1 &
@@ -121,6 +123,7 @@ jobs:
             for i in $(seq 120); do [ -f ~/.rojo-launcher/server.json ] && break; sleep 0.5; done
             cat boot.log
             "$PY" mac/check.py state version=$VER mac_app=True
+            "$PY" mac/check.py state update_checked=True update_error=None
             kill $pid; wait $pid 2>/dev/null || true
           }
           boot ""

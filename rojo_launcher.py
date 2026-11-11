@@ -32,7 +32,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-APP_VERSION = "3.3"
+APP_VERSION = "3.4"
 UPDATE_REPO = "ChocoBasta/RojoLauncher"   # where new versions of this app are published
 CONFIG_PATH = Path.home() / ".rojo-launcher.json"
 APP_HOME = Path.home() / ".rojo-launcher"
@@ -214,6 +214,29 @@ def parse_repo_spec(spec):
     return None
 
 
+def https_handler():
+    """HTTPS that works in the built app too. Its Python looks for certificates in a folder that
+    doesn't exist on a normal Mac, so use the certificate list bundled with it (certifi)."""
+    try:
+        import ssl
+        import certifi
+        ctx = ssl.create_default_context()        # the computer's own certificates, where Python finds them
+        ctx.load_verify_locations(certifi.where())  # plus the bundled list
+        return urllib.request.HTTPSHandler(context=ctx)
+    except Exception:
+        return urllib.request.HTTPSHandler()
+
+
+def _retry_without_token(fn, token):
+    """A saved token that expired makes GitHub say 401 even for public things: try once without it."""
+    try:
+        return fn(token)
+    except urllib.error.HTTPError as e:
+        if token and e.code == 401:
+            return fn("")
+        raise
+
+
 class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
     # GitHub release downloads redirect to a storage host that rejects our GitHub token.
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -224,11 +247,13 @@ class _DropAuthOnRedirect(urllib.request.HTTPRedirectHandler):
 
 
 def _download(url, token="", accept="application/octet-stream", timeout=120):
-    req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "rojo-launcher"})
-    if token:
-        req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.build_opener(_DropAuthOnRedirect).open(req, timeout=timeout) as r:
-        return r.read()
+    def get(tok):
+        req = urllib.request.Request(url, headers={"Accept": accept, "User-Agent": "rojo-launcher"})
+        if tok:
+            req.add_header("Authorization", "Bearer " + tok)
+        with urllib.request.build_opener(_DropAuthOnRedirect, https_handler()).open(req, timeout=timeout) as r:
+            return r.read()
+    return _retry_without_token(get, token)
 
 
 class LocalServer(http.server.ThreadingHTTPServer):
@@ -534,14 +559,16 @@ def install_app():
 # ---------------------------------------------------------------- github
 
 def _get_json(url, token=""):
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "rojo-launcher",
-    })
-    if token:
-        req.add_header("Authorization", "Bearer " + token)
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read().decode())
+    def get(tok):
+        req = urllib.request.Request(url, headers={
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "rojo-launcher",
+        })
+        if tok:
+            req.add_header("Authorization", "Bearer " + tok)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return json.loads(r.read().decode())
+    return _retry_without_token(get, token)
 
 
 def git_saved_token():
@@ -890,6 +917,8 @@ class App:
         self.fetched = list(self.cfg.get("repo_cache") or [])
         self.repos = self.merged(self.fetched)
         self.update = None        # {"version", ...} when a newer app version is available
+        self.update_checked = False
+        self.update_error = None  # why the last update check failed
         self.updating = False
         self.lock = threading.RLock()
         self.clients = set()
@@ -1068,6 +1097,8 @@ class App:
             "mac_app": MAC_APP,
             "version": APP_VERSION,
             "update": {"version": self.update["version"]} if self.update else None,
+            "update_checked": self.update_checked,
+            "update_error": self.update_error,
             "updating": self.updating,
         }
 
@@ -1349,10 +1380,15 @@ class App:
                 self.update = info if newer else None
                 msg = ("Version %s is ready. Press Update." % info["version"] if newer
                        else "You have the newest version (%s)." % APP_VERSION)
+                self.update_error = None
             except Exception as e:
                 ok, msg = False, "Couldn't check for updates right now."
+                self.update_error = str(e) or type(e).__name__
                 if manual:
                     self.log("~ Update check failed: %s" % e)
+                else:
+                    log_file("Update check failed: %s" % self.update_error)
+            self.update_checked = True
             self.push_state()
             if manual:
                 self.result("update_check", None, ok, msg)
@@ -1926,6 +1962,7 @@ def mac_window_look(window):
 
 def main():
     start_log_file()
+    urllib.request.install_opener(urllib.request.build_opener(https_handler()))
     _fix_path()
     threading.Thread(target=_merge_shell_path, daemon=True).start()
     APP_HOME.mkdir(parents=True, exist_ok=True)
