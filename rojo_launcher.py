@@ -31,10 +31,12 @@ import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-APP_VERSION = "3.1"
+APP_VERSION = "3.2"
 UPDATE_REPO = "ChocoBasta/RojoLauncher"   # where new versions of this app are published
 CONFIG_PATH = Path.home() / ".rojo-launcher.json"
 APP_HOME = Path.home() / ".rojo-launcher"
+FROZEN = bool(getattr(sys, "frozen", False))   # running as the built app, not from the .py file
+MAC_APP = FROZEN and sys.platform == "darwin"  # the Mac "Rojo Launcher.app"
 DEFAULTS = {
     "github_user": "ChocoBasta",
     "workspace": str(Path.home() / "RobloxProjects"),
@@ -46,6 +48,7 @@ DEFAULTS = {
     "auto_start": False,    # pull + start Rojo for the last repo when the app opens
     "size": [1000, 660],
     "banner_dismissed": False,
+    "move_banner_dismissed": False,  # Mac app: the "Move to Applications" note was closed
     "extra_repos": [],      # repos added with the + button (anyone's), shown as favorites
     "resume_rojo": "",      # restart Rojo for this repo after an app update
 }
@@ -85,15 +88,45 @@ def _fix_path():
     # so git, rojo (Aftman/Rokit/Foreman) and VS Code are still found.
     home = Path.home()
     extra = [home / ".aftman" / "bin", home / ".rokit" / "bin", home / ".foreman" / "bin",
-             home / ".cargo" / "bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin")]
+             home / ".cargo" / "bin", home / ".local" / "bin", Path("/opt/homebrew/bin"),
+             Path("/usr/local/bin"), Path("/opt/local/bin")]
     if sys.platform == "win32":
         la = Path(os.environ.get("LOCALAPPDATA", home / "AppData" / "Local"))
         extra += [Path("C:/Program Files/Git/cmd"), la / "Programs" / "Microsoft VS Code" / "bin"]
+    if sys.platform == "darwin":
+        extra.append(Path("/Applications/Visual Studio Code.app/Contents/Resources/app/bin"))
     parts = os.environ.get("PATH", "").split(os.pathsep)
     for p in extra:
         if p.is_dir() and str(p) not in parts:
             parts.append(str(p))
     os.environ["PATH"] = os.pathsep.join(parts)
+
+
+SHELL_PATH_READY = threading.Event()
+
+
+def _merge_shell_path():
+    """Mac: an app opened from Finder or the Dock doesn't see the PATH your Terminal has, so ask
+    your login shell for it once. Then rojo and git are found wherever Terminal finds them."""
+    try:
+        if sys.platform != "darwin":
+            return
+        import pwd
+        shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/zsh"
+        mark = "__ROJO_LAUNCHER_PATH__"
+        p = subprocess.run([shell, "-ilc", 'printf "\\n%s%%s%s\\n" "$PATH"' % (mark, mark)],
+                           capture_output=True, timeout=6, stdin=subprocess.DEVNULL, **TEXT)
+        m = re.search(re.escape(mark) + r"(.*?)" + re.escape(mark), p.stdout or "")
+        if not m:
+            return
+        have = os.environ.get("PATH", "").split(os.pathsep)
+        mine = [d for d in m.group(1).split(":") if d and os.path.isabs(d)]
+        merged = list(dict.fromkeys(mine + have))  # your shell's order first, nothing lost
+        os.environ["PATH"] = os.pathsep.join(merged)
+    except Exception:
+        pass
+    finally:
+        SHELL_PATH_READY.set()
 
 
 QUIET_GIT = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never", "GIT_OPTIONAL_LOCKS": "0"}
@@ -222,9 +255,82 @@ def icon_file(kind):
     return f
 
 
+# ---- the Mac app
+
+def mac_bundle():
+    """The 'Rojo Launcher.app' folder this copy runs from (Mac app only), or None."""
+    if not MAC_APP:
+        return None
+    for parent in Path(sys.executable).resolve().parents:
+        if parent.suffix == ".app":
+            return parent
+    return None
+
+
+def mac_app_folders():
+    return [Path("/Applications"), Path.home() / "Applications"]
+
+
+def mac_in_applications():
+    b = mac_bundle()
+    return b is not None and b.parent in mac_app_folders()
+
+
+def mac_move_to_applications():
+    """Copy this app into Applications (yours, if the main one can't be written) and return the
+    new copy. It's opened from there afterwards, so it shows in Launchpad, Spotlight and the Dock."""
+    src = mac_bundle()
+    if src is None:
+        raise RuntimeError("this isn't the Mac app")
+    last = None
+    for folder in mac_app_folders():
+        dest = folder / src.name
+        tmp = folder / (".%s.new" % src.name)
+        try:
+            folder.mkdir(exist_ok=True)
+            shutil.rmtree(tmp, ignore_errors=True)
+            p = subprocess.run(["ditto", str(src), str(tmp)], capture_output=True, **TEXT)
+            if p.returncode != 0:
+                raise OSError(p.stderr.strip() or "copy failed")
+            # You already said yes to opening it, so the copy shouldn't ask again.
+            subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(tmp)], capture_output=True)
+            if dest.exists() or dest.is_symlink():
+                old = folder / (".%s.old" % src.name)
+                shutil.rmtree(old, ignore_errors=True)
+                os.rename(dest, old)
+                os.rename(tmp, dest)
+                shutil.rmtree(old, ignore_errors=True)
+            else:
+                os.rename(tmp, dest)
+            return dest
+        except OSError as e:
+            last = e
+            shutil.rmtree(tmp, ignore_errors=True)
+    raise RuntimeError("couldn't copy it into Applications (%s)" % last)
+
+
+def mac_remove_old_shortcut():
+    """The Python version's 'Add to Desktop' made ~/Applications/Rojo Launcher.app, a tiny script
+    that starts Python. The real app replaces it, so take it away (only if it is that script)."""
+    if not MAC_APP:
+        return
+    old = Path.home() / "Applications" / "Rojo Launcher.app"
+    try:
+        if mac_bundle() == old.resolve():
+            return
+        exe = old / "Contents" / "MacOS" / "Rojo Launcher"
+        with open(exe, "rb") as f:
+            is_script = f.read(2) == b"#!"
+        if is_script and exe.stat().st_size < 4096:
+            shutil.rmtree(old)
+            (APP_HOME / "installed").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def is_installed():
-    if getattr(sys, "frozen", False) and sys.platform == "darwin":
-        return True  # the Mac build is already an .app; it just gets dragged to Applications
+    if MAC_APP:
+        return mac_in_applications()  # running from Applications, not from Downloads or the .dmg
     try:
         return Path((APP_HOME / "installed").read_text().strip()).exists()
     except OSError:
@@ -782,7 +888,9 @@ class App:
             "settings": {"github_user": self.cfg["github_user"], "workspace": ws, "port": self.rojo_port(),
                          "auto_start": bool(self.cfg.get("auto_start")), "has_token": has_token},
             "installed": is_installed(),
-            "banner": not is_installed() and not self.cfg.get("banner_dismissed"),
+            "banner": not is_installed() and not self.cfg.get(self.banner_key()),
+            "platform": {"win32": "win", "darwin": "mac"}.get(sys.platform, "linux"),
+            "mac_app": MAC_APP,
             "version": APP_VERSION,
             "update": {"version": self.update["version"]} if self.update else None,
             "updating": self.updating,
@@ -1039,6 +1147,9 @@ class App:
 
     def latest_version(self):
         tok = self.cfg.get("token", "")
+        fake = os.environ.get("ROJO_LAUNCHER_TEST_UPDATE")  # build test: pretend this zip is a new version
+        if fake and FROZEN:
+            return {"version": "999", "asset": Path(fake).resolve().as_uri(), "page": ""}
         if getattr(sys, "frozen", False):
             rel = _get_json("https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO, tok)
             want = "RojoLauncher-Windows.zip" if sys.platform == "win32" else "RojoLauncher-Mac.zip"
@@ -1117,9 +1228,11 @@ class App:
         return [str(py), str(Path(__file__).resolve())]
 
     def _install_exe(self, upd):
+        if MAC_APP and upd.get("asset") and mac_in_applications() and os.access(mac_bundle().parent, os.W_OK):
+            return self._install_mac_app(upd)
         if sys.platform != "win32" or not upd.get("asset"):
             webbrowser.open(upd.get("page") or "https://github.com/%s/releases/latest" % UPDATE_REPO)
-            return None  # Mac: the download page is open, replacing a running .app here isn't safe
+            return None  # not in Applications (or can't write there): the download page is open instead
         data = _download(upd["asset"], self.cfg.get("token", ""))
         with zipfile.ZipFile(io.BytesIO(data)) as z:
             new = z.read(next(n for n in z.namelist() if n.lower().endswith(".exe")))
@@ -1136,6 +1249,36 @@ class App:
             old.rename(exe)
             raise
         return [str(exe)]
+
+    def _install_mac_app(self, upd):
+        """Download the new .app next to us. The swap happens after this copy has quit: a small
+        script waits for it, puts the new app where the old one was, and opens it."""
+        work = APP_HOME / "update"
+        shutil.rmtree(work, ignore_errors=True)
+        work.mkdir(parents=True, exist_ok=True)
+        zpath = work / "RojoLauncher-Mac.zip"
+        zpath.write_bytes(_download(upd["asset"], self.cfg.get("token", "")))
+        p = subprocess.run(["ditto", "-x", "-k", str(zpath), str(work / "new")], capture_output=True, **TEXT)
+        if p.returncode != 0:
+            raise RuntimeError("couldn't unpack the update (%s)" % p.stderr.strip())
+        new = next((work / "new").glob("*.app"), None)
+        if new is None:
+            raise RuntimeError("the download has no app in it")
+        p = subprocess.run(["codesign", "--verify", "--deep", str(new)], capture_output=True, **TEXT)
+        if p.returncode != 0:  # never swap in an app that macOS wouldn't open
+            raise RuntimeError("the downloaded app didn't check out (%s)" % p.stderr.strip())
+        subprocess.run(["xattr", "-dr", "com.apple.quarantine", str(new)], capture_output=True)
+        script = (
+            'pid="$1"; app="$2"; new="$3"; work="$4"; i=0\n'
+            'while kill -0 "$pid" 2>/dev/null && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done\n'
+            'old="$app.old-$$"\n'
+            'if mv "$app" "$old"; then\n'
+            '  if mv "$new" "$app"; then rm -rf "$old"; else mv "$old" "$app"; fi\n'
+            'fi\n'
+            'open "$app"\n'
+            'rm -rf "$work"\n')
+        return ["/bin/sh", "-c", script, "rojo-launcher-update", str(os.getpid()), str(mac_bundle()),
+                str(new), str(work)]
 
     def restart(self, cmd):
         """Start the new version on the same port and token, so an open window reconnects to it."""
@@ -1232,6 +1375,8 @@ class App:
         return {"path": box.get("path", "")}
 
     def install(self):
+        if MAC_APP:
+            return self.move_to_applications()
         try:
             where = install_app()
             msg, ok = "Rojo Launcher is now %s" % where, True
@@ -1240,6 +1385,24 @@ class App:
         self.log(("OK " if ok else "!! ") + msg)
         self.push_state()
         return {"ok": ok, "message": msg}
+
+    def banner_key(self):
+        return "move_banner_dismissed" if MAC_APP else "banner_dismissed"
+
+    def move_to_applications(self):
+        try:
+            dest = mac_move_to_applications()
+        except Exception as e:
+            msg = "Couldn't move it to Applications: %s" % e
+            self.log("!! " + msg)
+            return {"ok": False, "message": msg}
+        self.log("OK Moved to %s, reopening from there" % dest.parent)
+
+        def reopen():
+            time.sleep(0.6)  # let this answer reach the window first
+            self.restart(["open", "-n", str(dest)])
+        threading.Thread(target=reopen, daemon=True).start()
+        return {"ok": True, "message": "Moved to Applications. Reopening from there..."}
 
     def action(self, name, b):
         repo = b.get("repo")
@@ -1271,8 +1434,13 @@ class App:
             return self.browse()
         if name == "install":
             return self.install()
+        if name == "reveal_app":
+            b = mac_bundle()
+            if b:
+                subprocess.Popen(["open", "-R", str(b)])
+            return {"ok": bool(b)}
         if name == "dismiss_banner":
-            self.cfg["banner_dismissed"] = True
+            self.cfg[self.banner_key()] = True
             save_config(self.cfg)
             self.push_state()
             return {"ok": True}
@@ -1302,6 +1470,8 @@ class App:
 
     def boot(self):
         def work():
+            SHELL_PATH_READY.wait(8)  # Mac: Terminal's PATH first, so rojo is found the same way
+            self.git = bool(shutil.which("git"))
             self.rojo = rojo_version()
             if not self.rojo:
                 self.log("!! Rojo isn't installed or isn't on your PATH.")
@@ -1549,9 +1719,31 @@ def close_splash(*_):
         pass
 
 
+def mac_window_look(window):
+    """Mac: dark title bar in the page's colour, so the window looks like one piece."""
+    try:
+        import AppKit
+        from PyObjCTools import AppHelper
+        AppKit.NSApplication.sharedApplication().setAppearance_(
+            AppKit.NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua"))
+
+        def tint():
+            try:
+                w = window.native
+                w.setTitlebarAppearsTransparent_(True)
+                w.contentView().superview().subviews().lastObject().setBackgroundColor_(w.backgroundColor())
+            except Exception:
+                pass
+        window.events.shown += lambda *_: AppHelper.callAfter(tint)
+    except Exception:
+        pass
+
+
 def main():
     _fix_path()
+    threading.Thread(target=_merge_shell_path, daemon=True).start()
     APP_HOME.mkdir(parents=True, exist_ok=True)
+    mac_remove_old_shortcut()
     reuse_port = int(os.environ.pop("ROJO_LAUNCHER_PORT", "0") or 0)  # set when restarting after an update
     reuse_token = os.environ.pop("ROJO_LAUNCHER_TOKEN", "")
     reuse_window = os.environ.pop("ROJO_LAUNCHER_REUSE", "") == "1"
@@ -1625,6 +1817,8 @@ def main():
                 app.window = webview.create_window("Rojo Launcher", app.url(), width=w, height=h,
                                                    min_size=(820, 540), background_color="#0b0d12")
                 app.window.events.shown += close_splash
+                if sys.platform == "darwin":
+                    mac_window_look(app.window)
                 webview.start()
                 app.shutdown()
             except Exception:
@@ -1963,7 +2157,7 @@ body.updating #updating .bar i{animation:slide 1.15s var(--ease) infinite}
       <button class="hint-link" id="private-hint" hidden>Missing private repos? Add a token</button>
       <div class="banner" id="banner" hidden>
         <button class="icon-btn x" id="banner-x" title="Hide"></button>
-        <b>Open it like a normal app</b>Add Rojo Launcher to your Desktop and Start menu.
+        <b id="banner-title">Open it like a normal app</b><span id="banner-text">Add Rojo Launcher to your Desktop and Start menu.</span>
         <div class="acts"><button class="btn small primary" id="banner-add">Add to Desktop</button></div>
       </div>
     </div>
@@ -2025,7 +2219,7 @@ body.updating #updating .bar i{animation:slide 1.15s var(--ease) infinite}
     <div class="field"><label for="f-port">Rojo port</label><input type="number" id="f-port" min="1" max="65535"></div>
     <label class="switch"><span>Pull and start my last repo when the app opens</span><input type="checkbox" id="f-auto"><i></i></label>
     <div class="sheet-sep"></div>
-    <div class="field"><label>Shortcut</label><button class="btn" id="f-install"></button></div>
+    <div class="field"><label id="f-install-label">Shortcut</label><button class="btn" id="f-install"></button></div>
   </div>
   <div class="sheet-foot"><span class="ver"><span id="ver"></span><button id="chk">Check for updates</button></span><button class="btn" id="sheet-cancel">Cancel</button><button class="btn primary" id="sheet-save">Save</button></div>
 </aside>
@@ -2305,6 +2499,10 @@ function renderRojo(r, i, busy, put) {
 function renderChrome() {
   $("#refresh").classList.toggle("spinning", !!S.loading);
   $("#banner").hidden = !S.banner;
+  if (S.banner) {
+    const t = installText();
+    $("#banner-title").textContent = t.title; $("#banner-text").textContent = t.text; $("#banner-add").textContent = t.button;
+  }
   $("#private-hint").hidden = !S.public_only;
   $("#ver").textContent = "Version " + S.version;
   const u = S.update && !S.updating;
@@ -2482,7 +2680,9 @@ function openSettings() {
   const c = $("#tok-clear"), m = $("#tok-make");
   if (c) c.onclick = () => { api("settings", { clear_token: true }); closeSettings(); toast("ok", "Token removed"); };
   if (m) m.onclick = () => api("open_url", { url: "https://github.com/settings/tokens/new?scopes=repo&description=Rojo%20Launcher" });
-  setHTML($("#f-install"), I.monitor + (S.installed ? "Add to Desktop again" : "Add to Desktop & Start menu"));
+  const it = installText();
+  $("#f-install-label").textContent = it.label;
+  setHTML($("#f-install"), I.monitor + it.setting);
   document.body.classList.add("settings");
 }
 function closeSettings() { document.body.classList.remove("settings"); if (document.activeElement) document.activeElement.blur(); }
@@ -2491,7 +2691,16 @@ function saveSettings() {
     auto_start: $("#f-auto").checked, token: $("#f-token").value }).then(() => toast("ok", "Settings saved"));
   closeSettings();
 }
+function installText() {
+  if (S.mac_app) return { title: "Move it to Applications", text: "Then it opens from Launchpad, Spotlight and the Dock like any app.",
+    button: "Move to Applications", label: "App", setting: S.installed ? "Show in Finder" : "Move to Applications" };
+  if (S.platform === "mac") return { title: "Open it like a normal app", text: "Add Rojo Launcher to your Applications.",
+    button: "Add to Applications", label: "Shortcut", setting: S.installed ? "Add to Applications again" : "Add to Applications" };
+  return { title: "Open it like a normal app", text: "Add Rojo Launcher to your Desktop and Start menu.",
+    button: "Add to Desktop", label: "Shortcut", setting: S.installed ? "Add to Desktop again" : "Add to Desktop & Start menu" };
+}
 function install() {
+  if (S.mac_app && S.installed) { api("reveal_app"); return; }
   api("install").then(r => toast(r.ok ? "ok" : "error", r.message || "Done", !r.ok));
 }
 

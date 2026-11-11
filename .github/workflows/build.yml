@@ -1,7 +1,7 @@
 name: Build app
 
-# Builds the Windows .exe and the Mac .app and attaches them to a GitHub Release.
-# Runs when a version tag like v2.0 is pushed, or by hand from the Actions tab.
+# Builds the Windows .exe and the Mac app (universal: Apple Silicon and Intel) and attaches them
+# to a GitHub Release. Runs when a version tag like v3.2 is pushed, or by hand from the Actions tab.
 on:
   push:
     tags: ["v*"]
@@ -11,50 +11,167 @@ permissions:
   contents: write
 
 jobs:
-  build:
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            file: RojoLauncher-Windows.zip
-          - os: macos-latest
-            file: RojoLauncher-Mac.zip
-    runs-on: ${{ matrix.os }}
+  windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - run: pip install pyinstaller==6.11.1 pyinstaller-hooks-contrib "pywebview>=5.1,<6"
-
-      - name: Build (Windows)
-        if: runner.os == 'Windows'
+      - name: Build
         run: |
           pyinstaller --noconfirm --onefile --windowed --name "Rojo Launcher" --icon icon.ico --splash splash.png rojo_launcher.py
-          Compress-Archive -Path "dist/Rojo Launcher.exe" -DestinationPath "${{ matrix.file }}"
+          Compress-Archive -Path "dist/Rojo Launcher.exe" -DestinationPath RojoLauncher-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RojoLauncher-Windows
+          path: RojoLauncher-Windows.zip
 
-      - name: Build (Mac)
-        if: runner.os == 'macOS'
+  mac:
+    runs-on: macos-15
+    env:
+      PY: /Library/Frameworks/Python.framework/Versions/3.12/bin/python3
+      APP: dist/Rojo Launcher.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python from python.org (a universal build, so the app runs on Apple Silicon and Intel)
         run: |
-          pyinstaller --noconfirm --windowed --name "Rojo Launcher" --icon icon.icns \
-            --osx-bundle-identifier local.rojo-launcher rojo_launcher.py
-          cd dist && ditto -c -k --keepParent "Rojo Launcher.app" "../${{ matrix.file }}"
+          curl -fsSL -o py.pkg https://www.python.org/ftp/python/3.12.10/python-3.12.10-macos11.pkg
+          sudo installer -pkg py.pkg -target / >/dev/null
+          "$PY" -m venv venv
+          venv/bin/pip install -q pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.10 pywebview==5.4 \
+            pyobjc-core==13.0 pyobjc-framework-Cocoa==13.0 pyobjc-framework-Quartz==13.0 \
+            pyobjc-framework-WebKit==13.0 pyobjc-framework-Security==13.0 dmgbuild==1.6.7
+          lipo -archs "$(venv/bin/python -c 'import sys, os; print(os.path.realpath(sys.executable))')"
+
+      - name: Icon
+        run: |
+          mkdir icon.iconset
+          for s in 16 32 128 256 512; do
+            sips -z $s $s mac/icon.png --out icon.iconset/icon_${s}x${s}.png >/dev/null
+            sips -z $((s*2)) $((s*2)) mac/icon.png --out icon.iconset/icon_${s}x${s}@2x.png >/dev/null
+          done
+          iconutil -c icns icon.iconset -o mac/icon.icns
+
+      - name: Build Rojo Launcher.app
+        run: |
+          VER=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' rojo_launcher.py)
+          echo "VER=$VER" >> "$GITHUB_ENV"
+          venv/bin/pyinstaller --noconfirm --windowed --name "Rojo Launcher" --icon mac/icon.icns \
+            --osx-bundle-identifier com.chocobasta.rojolauncher --target-arch universal2 \
+            --exclude-module tkinter rojo_launcher.py
+          P="$APP/Contents/Info.plist"
+          plutil -replace CFBundleDisplayName -string "Rojo Launcher" "$P"
+          plutil -replace CFBundleShortVersionString -string "$VER" "$P"
+          plutil -replace CFBundleVersion -string "$VER" "$P"
+          plutil -replace LSMinimumSystemVersion -string "11.0" "$P"
+          plutil -replace LSApplicationCategoryType -string "public.app-category.developer-tools" "$P"
+          plutil -replace NSAppTransportSecurity -json '{"NSAllowsLocalNetworking": true}' "$P"
+          # Ad-hoc signature: macOS on Apple Silicon only runs signed apps, and this needs no Apple account.
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          echo "Architectures: $(lipo -archs "$APP/Contents/MacOS/Rojo Launcher")"
+          du -sh "$APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" RojoLauncher-Mac.zip
+
+      - name: "Test: starts on Apple Silicon and on Intel (Rosetta)"
+        run: |
+          boot() {
+            rm -f ~/.rojo-launcher/server.json
+            ROJO_LAUNCHER_HEADLESS=1 $1 "$APP/Contents/MacOS/Rojo Launcher" > boot.log 2>&1 &
+            pid=$!
+            for i in $(seq 120); do [ -f ~/.rojo-launcher/server.json ] && break; sleep 0.5; done
+            cat boot.log
+            "$PY" mac/check.py state version=$VER mac_app=True
+            kill $pid; wait $pid 2>/dev/null || true
+          }
+          boot ""
+          sudo softwareupdate --install-rosetta --agree-to-license >/dev/null 2>&1 || true
+          boot "arch -x86_64"
+
+      - name: "Test: opens a real window, finds rojo through the login shell's PATH"
+        run: |
+          mkdir -p ~/only-in-my-shell
+          printf '#!/bin/sh\necho "Rojo 7.99.0"\n' > ~/only-in-my-shell/rojo
+          chmod +x ~/only-in-my-shell/rojo
+          for f in ~/.zshrc ~/.zprofile ~/.bash_profile ~/.bashrc; do echo 'export PATH="$HOME/only-in-my-shell:$PATH"' >> "$f"; done
+          rm -f ~/.rojo-launcher/server.json
+          open "$APP"
+          "$PY" mac/check.py wait-server
+          sleep 8
+          screencapture -x shot-1-window.png || true
+          "$PY" mac/check.py state rojo=7.99.0 installed=False banner=True
+          "$PY" mac/check.py connected
+
+      - name: "Test: Move to Applications"
+        run: |
+          "$PY" mac/check.py post install
+          "$PY" mac/check.py wait-new-server
+          sleep 6
+          screencapture -x shot-2-moved.png || true
+          "$PY" mac/check.py state installed=True banner=False
+          codesign --verify --deep --strict "/Applications/Rojo Launcher.app"
+          pgrep -fl "/Applications/Rojo Launcher.app/Contents/MacOS/Rojo Launcher"
+          pkill -f "Rojo Launcher.app/Contents/MacOS/Rojo Launcher" || true
+          sleep 2
+
+      - name: "Test: updates itself in place"
+        run: |
+          before=$(stat -f %i "/Applications/Rojo Launcher.app")
+          rm -f ~/.rojo-launcher/server.json
+          ROJO_LAUNCHER_TEST_UPDATE="$PWD/RojoLauncher-Mac.zip" "/Applications/Rojo Launcher.app/Contents/MacOS/Rojo Launcher" > upd.log 2>&1 &
+          "$PY" mac/check.py wait-server
+          "$PY" mac/check.py wait-update
+          "$PY" mac/check.py post apply_update
+          "$PY" mac/check.py wait-new-server
+          sleep 6
+          screencapture -x shot-3-updated.png || true
+          after=$(stat -f %i "/Applications/Rojo Launcher.app")
+          echo "app folder inode before $before, after $after"
+          test "$before" != "$after"
+          codesign --verify --deep --strict "/Applications/Rojo Launcher.app"
+          ls -la /Applications | grep -i rojo
+          test -z "$(ls -d /Applications/Rojo\ Launcher.app.old-* 2>/dev/null)"
+          "$PY" mac/check.py state installed=True
+          pkill -f "Rojo Launcher.app/Contents/MacOS/Rojo Launcher" || true
+
+      - name: Disk image
+        run: |
+          venv/bin/dmgbuild -s mac/dmg_settings.py -D app="$APP" -D icon=mac/icon.icns "Rojo Launcher" RojoLauncher-Mac.dmg
+          hdiutil attach -nobrowse -readonly -mountpoint /tmp/rl RojoLauncher-Mac.dmg
+          ls -la /tmp/rl
+          codesign --verify --deep --strict "/tmp/rl/Rojo Launcher.app"
+          hdiutil detach /tmp/rl
+          open RojoLauncher-Mac.dmg && sleep 6 && screencapture -x shot-4-dmg.png || true
+          ls -la RojoLauncher-Mac.*
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.file }}
-          path: ${{ matrix.file }}
+          name: RojoLauncher-Mac
+          path: |
+            RojoLauncher-Mac.dmg
+            RojoLauncher-Mac.zip
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mac-test-screenshots
+          path: shot-*.png
+          if-no-files-found: ignore
 
   release:
-    needs: build
+    needs: [windows, mac]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
+          pattern: RojoLauncher-*
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             RojoLauncher-Windows.zip
+            RojoLauncher-Mac.dmg
             RojoLauncher-Mac.zip
