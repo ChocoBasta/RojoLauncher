@@ -105,6 +105,17 @@ jobs:
           "$PY" mac/check.py state rojo=7.99.0 installed=False banner=True
           "$PY" mac/check.py connected
 
+      - name: "Test: Free port stops what's using Rojo's port"
+        run: |
+          "$PY" -c "import socket, time; s = socket.socket(); s.bind(('127.0.0.1', 34872)); s.listen(); time.sleep(600)" &
+          holder=$!
+          "$PY" mac/check.py wait-busy
+          "$PY" mac/check.py post free_port
+          for i in $(seq 30); do kill -0 $holder 2>/dev/null || break; sleep 0.5; done
+          if kill -0 $holder 2>/dev/null; then echo "the program on the port is still running"; exit 1; fi
+          "$PY" mac/check.py state port_busy=None freeing=False
+          tail -3 ~/.rojo-launcher/launcher.log
+
       - name: "Test: Move to Applications"
         run: |
           "$PY" mac/check.py post install
@@ -113,7 +124,9 @@ jobs:
           screencapture -x shot-2-moved.png || true
           "$PY" mac/check.py state installed=True banner=False
           codesign --verify --deep --strict "/Applications/Rojo Launcher.app"
-          pgrep -fl "/Applications/Rojo Launcher.app/Contents/MacOS/Rojo Launcher"
+          pgrep -fl "Rojo Launcher.app/Contents/MacOS/Rojo Launcher"
+          test "$(pgrep -f 'Rojo Launcher.app/Contents/MacOS/Rojo Launcher' | wc -l | tr -d ' ')" = 1  # the old copy quit
+          pgrep -f "/Applications/Rojo Launcher.app/Contents/MacOS/Rojo Launcher"
           pkill -f "Rojo Launcher.app/Contents/MacOS/Rojo Launcher" || true
           sleep 2
 

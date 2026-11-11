@@ -32,7 +32,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-APP_VERSION = "3.2"
+APP_VERSION = "3.3"
 UPDATE_REPO = "ChocoBasta/RojoLauncher"   # where new versions of this app are published
 CONFIG_PATH = Path.home() / ".rojo-launcher.json"
 APP_HOME = Path.home() / ".rojo-launcher"
@@ -252,6 +252,81 @@ def port_open(port):
         return True
     except OSError:
         return False
+
+
+def port_holders(port):
+    """[(pid, name)] of the programs on this computer listening on this port (never this app)."""
+    found = {}
+    try:
+        if sys.platform == "win32":
+            out = subprocess.run(["netstat", "-ano"], capture_output=True, timeout=15, **TEXT, **_no_window()).stdout
+            for line in out.splitlines():
+                parts = line.split()
+                if (len(parts) >= 5 and parts[0].upper() == "TCP" and parts[3].upper() == "LISTENING"
+                        and parts[1].rsplit(":", 1)[-1] == str(port) and parts[4].isdigit()):
+                    found[int(parts[4])] = ""
+            for pid in list(found):
+                t = subprocess.run(["tasklist", "/FI", "PID eq %d" % pid, "/FO", "CSV", "/NH"], capture_output=True,
+                                   timeout=15, **TEXT, **_no_window()).stdout
+                m = re.match(r'"([^"]+)"', t.strip())
+                found[pid] = m.group(1) if m else ""
+        else:
+            lsof = shutil.which("lsof") or ("/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else None)
+            if lsof:
+                out = subprocess.run([lsof, "-nP", "-iTCP:%d" % port, "-sTCP:LISTEN", "-Fpc"], capture_output=True,
+                                     timeout=15, **TEXT).stdout
+                pid = None
+                for line in out.splitlines():
+                    if line[:1] == "p" and line[1:].isdigit():
+                        pid = int(line[1:])
+                        found[pid] = ""
+                    elif line[:1] == "c" and pid is not None:
+                        found[pid] = line[1:]
+            elif shutil.which("ss"):
+                out = subprocess.run(["ss", "-ltnpH", "sport = :%d" % port], capture_output=True, timeout=15, **TEXT).stdout
+                for name, pid in re.findall(r'\("([^"]+)",pid=(\d+)', out):
+                    found[int(pid)] = name
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    found.pop(os.getpid(), None)
+    return sorted(found.items())
+
+
+def holder_names(holders):
+    names = sorted({re.sub(r"\.exe$", "", n, flags=re.I) for _, n in holders if n})
+    return ", ".join(names)
+
+
+def free_port(port, log):
+    """Stop whatever is listening on this port (an old Rojo, usually). Returns (ok, message)."""
+    holders = port_holders(port)
+    if not holders:
+        if not port_open(port):
+            return True, "Port %d is free." % port
+        return False, "Something is using port %d, but this app can't see what (it may belong to another user)." % port
+    who = holder_names(holders) or "the program"
+    for pid, name in holders:
+        log("~ Stopping %s (process %d), it was using port %d" % (name or "a program", pid, port))
+        try:
+            if sys.platform == "win32":
+                subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, **_no_window())
+            else:
+                os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    for sig in (None, getattr(signal, "SIGKILL", None)):
+        if sig is not None and sys.platform != "win32":
+            for pid, _ in holders:
+                try:
+                    os.kill(pid, sig)
+                except OSError:
+                    pass
+        deadline = time.time() + 4
+        while time.time() < deadline and port_open(port):
+            time.sleep(0.2)
+        if not port_open(port):
+            return True, "Stopped %s. Port %d is free." % (who, port)
+    return False, "Couldn't stop %s on port %d. Try closing it yourself." % (who, port)
 
 
 def ago(ts):
@@ -697,8 +772,9 @@ class RojoServer:
                 return False, "This repo has no Rojo project file (.project.json)."
             self._stop()
             if port_open(port):
-                return False, ("Port %d is already in use. Is Rojo running somewhere else, "
-                               "like the VS Code extension?" % port)
+                who = holder_names(port_holders(port))
+                return False, ("Port %d is already in use%s. Press Free port to stop it." %
+                               (port, " by " + who if who else ""))
             cmd = [rojo, "serve"] + ([project] if project else []) + ["--port", str(port)]
             self.log("$ rojo " + " ".join(cmd[1:]))
             extra = {} if sys.platform == "win32" else {"start_new_session": True}
@@ -760,7 +836,7 @@ class RojoServer:
         if crashed:
             detail = next((l for l in reversed(tail) if "details" in l.lower() or "error" in l.lower()),
                           tail[-1] if tail else "exit code %s" % code)
-            msg = ("Port %s is busy. Is Rojo already running somewhere else?" % self.port if busy_port
+            msg = ("Port %s is busy. Press Free port to stop what's using it." % self.port if busy_port
                    else "Rojo stopped: " + detail.strip())
             self.log("!! " + msg)
             self.on_crash(msg)
@@ -837,6 +913,9 @@ class App:
         self.main_tasks = queue.Queue()
         self.httpd = None
         self.server = RojoServer(self.log, on_change=self.push_state, on_crash=self.rojo_crashed)
+        self.port_busy = None     # {"port", "who"} while something else holds Rojo's port
+        self.freeing = False
+        self.port_check = threading.Lock()
 
     # ---- events
 
@@ -875,6 +954,56 @@ class App:
 
     def rojo_crashed(self, msg):
         self.result("rojo", None, False, msg)
+        self.check_port()
+
+    # ---- Rojo's port
+
+    def check_port(self):
+        """Notice when something other than our own Rojo holds the port, so the window can offer Free port."""
+        with self.port_check:
+            port = self.rojo_port()
+            busy = None
+            if not self.server.running() and not self.freeing and port_open(port):
+                old = self.port_busy
+                if old and old.get("port") == port:
+                    busy = old
+                else:
+                    busy = {"port": port, "who": holder_names(port_holders(port))}
+            if busy != self.port_busy:
+                self.port_busy = busy
+                self.push_state()
+
+    def watch_port(self):
+        while True:
+            try:
+                self.check_port()
+            except Exception:
+                pass
+            if self.shutdown_evt.wait(2.5):
+                return
+
+    def free_port(self, name):
+        if self.freeing:
+            return {"ok": True}
+        self.freeing = True
+        self.push_state()
+
+        def work():
+            try:
+                ok, msg = free_port(self.rojo_port(), self.log)
+            except Exception as e:
+                ok, msg = False, "Couldn't free the port: %s" % e
+            self.freeing = False
+            self.port_busy = None
+            self.check_port()
+            self.log(("OK " if ok else "!! ") + msg)
+            self.result("free_port", name, ok, msg)
+            self.push_state()
+            r = self.find(name) if name else None
+            if ok and r and (repo_folder(r, self.cfg["workspace"]) / ".git").exists():
+                self.start(name)
+        threading.Thread(target=work, daemon=True).start()
+        return {"ok": True}
 
     # ---- state
 
@@ -927,6 +1056,8 @@ class App:
             "infos": infos,
             "loading": self.loading,
             "rojo": self.rojo,
+            "port_busy": self.port_busy,
+            "freeing": self.freeing,
             "git": self.git,
             "public_only": bool(repos) and not has_token and not any(r["private"] for r in repos),
             "settings": {"github_user": self.cfg["github_user"], "workspace": ws, "port": self.rojo_port(),
@@ -1065,6 +1196,8 @@ class App:
             self._release(name)
             self.log(("OK " if ok else "!! ") + msg)
             self.result("start", name, ok, msg)
+            if not ok:
+                self.check_port()
             self.push_state()
         threading.Thread(target=work, daemon=True).start()
         return {"ok": True}
@@ -1460,6 +1593,8 @@ class App:
             return self.start(repo)
         if name == "stop":
             return self.stop()
+        if name == "free_port":
+            return self.free_port(repo)
         if name == "refresh":
             return self.refresh_repos()
         if name == "select":
@@ -1842,6 +1977,7 @@ def main():
         pass
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     threading.Thread(target=app.watch_clients, daemon=True).start()
+    threading.Thread(target=app.watch_port, daemon=True).start()
     app.boot()
 
     w, h = (app.cfg.get("size") or DEFAULTS["size"])[:2]
@@ -2522,6 +2658,7 @@ function renderRojo(r, i, busy, put) {
   let cls = "", label, small, bhtml, bcls = "", act = null, dis = false;
   if (S.rojo === "") { label = "Rojo isn't installed"; small = "Install it, then reopen this app"; bhtml = "How to"; act = () => api("open_url", { url: "https://rojo.space/docs/v7/getting-started/installation/" }); }
   else if (busy === "start") { cls = "starting"; label = "Starting Rojo…"; small = "One moment"; bhtml = SPIN; dis = true; }
+  else if (S.freeing) { cls = "starting"; label = "Freeing port " + S.settings.port + "…"; small = "Stopping what was using it"; bhtml = SPIN; dis = true; }
   else if (mine && stopping) { cls = "starting"; label = "Stopping Rojo…"; small = "One moment"; bhtml = SPIN; dis = true; }
   else if (mine && !sv.ready) { cls = "starting"; label = "Starting Rojo…"; small = "Port " + sv.port; bhtml = I.stop + "Stop"; bcls = "stop"; act = doStop; }
   else if (mine) { cls = "live"; label = "Rojo is live"; small = "Port " + sv.port + " · press Connect in Studio"; bhtml = I.stop + "Stop"; bcls = "stop"; act = doStop; }
@@ -2535,6 +2672,9 @@ function renderRojo(r, i, busy, put) {
   else if (!r.cloned) { cls = sv ? "other" : ""; label = sv ? "Rojo is running " + sv.repo : "Rojo"; small = "Download this repo first"; bhtml = I.play + "Start"; dis = true; }
   else if (!known) { label = sv ? "Rojo is running " + sv.repo : "Rojo is off"; small = " "; bhtml = I.play + "Start"; dis = true; }
   else if (i.project === false) { label = "No Rojo project here"; small = "This repo has no .project.json file"; bhtml = I.play + "Start"; dis = true; }
+  else if (S.port_busy && !sv) { label = "Port " + S.port_busy.port + " is busy";
+    small = (S.port_busy.who ? S.port_busy.who + " is using it" : "Another program is using it") + " · Free it to start Rojo";
+    bhtml = I.stop + "Free port"; bcls = "stop"; act = doFreePort; }
   else if (sv) { cls = "other"; label = "Rojo is running " + sv.repo; small = "Switch it to this repo"; bhtml = I.play + "Switch"; bcls = "go"; act = doStart; }
   else { label = "Rojo is off"; small = "Start it, then press Connect in Studio"; bhtml = I.play + "Start"; bcls = "go"; act = doStart; }
   for (const c of ["live", "starting", "other"]) card.classList.toggle(c, c === cls);
@@ -2587,6 +2727,11 @@ function doStop() {
   stopping = true; renderDetail(); api("stop");
   setTimeout(() => { if (stopping) { stopping = false; renderDetail(); } }, 8000);
 }
+function doFreePort() {
+  const r = sel && repo(sel);
+  S.freeing = true; renderDetail();
+  api("free_port", { repo: r ? r.name : "" });
+}
 function rojoAction() { const b = $("#rojo-btn"); if (!b.disabled && b.onclick) b.onclick(); }
 
 function onResult(ev) {
@@ -2605,6 +2750,8 @@ function onResult(ev) {
     else if (ev.repo !== sel) toast("ok", ev.repo + ": " + ev.message);
   } else if (ev.op === "start") {
     if (!ev.ok) toast("error", ev.message, true);
+  } else if (ev.op === "free_port") {
+    toast(ev.ok ? "ok" : "error", ev.message, !ev.ok);
   } else if (ev.op === "rojo" || ev.op === "refresh") {
     toast("error", ev.message, true);
   } else if (ev.op === "update_check") {

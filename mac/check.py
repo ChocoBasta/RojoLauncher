@@ -5,6 +5,7 @@ Talks to the running app the same way its window does, through ~/.rojo-launcher/
   check.py wait-new-server        wait until a different copy is up (after Move / Update)
   check.py state key=value ...    wait until the app's state has these values
   check.py wait-update            wait until the app has found an update
+  check.py wait-busy              wait until the app sees something else on Rojo's port
   check.py post <action>          press a button (install, apply_update, ...)
   check.py connected              the window's page is connected to the app
 """
@@ -76,6 +77,9 @@ def main(cmd, *args):
     elif cmd == "wait-update":
         wait("an update", lambda: call("/api/state").get("update"), 45)
         print("update found:", call("/api/state")["update"])
+    elif cmd == "wait-busy":
+        wait("the app to notice the busy port", lambda: call("/api/state").get("port_busy"), 30)
+        print("port busy:", call("/api/state")["port_busy"])
     elif cmd == "post":
         LAST.write_text(json.dumps(info()))
         r = call("/api/" + args[0], {})

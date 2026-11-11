@@ -8,6 +8,7 @@ Pick a repo, press **Pull** to get the latest from GitHub, then press **Start** 
 
 - **Pull** (the big button) gets the latest from GitHub. The first time, it downloads the repo instead. It shows how many new changes are waiting before you press it.
 - **Start / Stop** runs `rojo serve` for that repo. If you press Start while a pull is running, Rojo starts as soon as the pull finishes. Switching to another repo stops the old server first, so the port is never left busy.
+- **Port busy?** If something else is already using Rojo's port (an old Rojo, the VS Code extension), the Rojo card says what it is and shows **Free port**. Press it to stop that program and start Rojo here.
 - Your unsaved changes are never overwritten. If a pull can't go ahead, the app tells you and leaves your files alone.
 - **Favorites:** press the ★ next to a repo's name to keep it at the top.
 - **Add any repo** with the **+** button: type `owner/repo` or paste the GitHub link. It can be anyone's repo, and it goes into your Favorites. Repos you added have a **Remove** link (this only takes them off the list; the folder on your computer stays).
@@ -53,4 +54,4 @@ The app looks for updates in the `ChocoBasta/RojoLauncher` repo (`UPDATE_REPO` n
 1. Raise `APP_VERSION` in `rojo_launcher.py` and push it to `main`. Copies running from the Python file update from that file.
 2. Push a tag with the same number, such as `v3.2`. The GitHub Action in `.github/workflows/build.yml` builds the Windows .exe and the Mac app with PyInstaller and attaches them to a Release (`RojoLauncher-Windows.zip`, `RojoLauncher-Mac.dmg`, and `RojoLauncher-Mac.zip`, which the Mac app updates from). The .exe and the Mac app update from the latest Release.
 
-The Mac build runs on GitHub's Mac machines: a universal app (Apple Silicon + Intel) from python.org's Python, signed ad hoc (free, no Apple account), with the icon from `mac/icon.png` (drawn by `mac/make_icon.py` on Apple's icon grid). Before it packs the `.dmg`, it opens the app for real and checks it starts on both chip types, finds `rojo` through your shell's PATH, opens its window, moves itself to Applications and updates itself in place (`mac/check.py`).
+The Mac build runs on GitHub's Mac machines: a universal app (Apple Silicon + Intel) from python.org's Python, signed ad hoc (free, no Apple account), with the icon from `mac/icon.png` (drawn by `mac/make_icon.py` on Apple's icon grid). Before it packs the `.dmg`, it opens the app for real and checks it starts on both chip types, finds `rojo` through your shell's PATH, opens its window, frees a busy port, moves itself to Applications and updates itself in place (`mac/check.py`). If a test fails, no Release is made.
