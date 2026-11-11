@@ -20,6 +20,7 @@ import secrets
 import shutil
 import signal
 import socket
+import socketserver
 import subprocess
 import sys
 import threading
@@ -228,6 +229,20 @@ def _download(url, token="", accept="application/octet-stream", timeout=120):
         req.add_header("Authorization", "Bearer " + token)
     with urllib.request.build_opener(_DropAuthOnRedirect).open(req, timeout=timeout) as r:
         return r.read()
+
+
+class LocalServer(http.server.ThreadingHTTPServer):
+    """The window's server, on 127.0.0.1 only."""
+    daemon_threads = True
+
+    def server_bind(self):
+        # Skip HTTPServer's reverse lookup of its own address (socket.getfqdn). On a Mac that
+        # lookup can make macOS ask to "find devices on local networks", which this app never does.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
+LOCAL = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # talks to 127.0.0.1, never via a proxy
 
 
 def port_open(port):
@@ -1745,6 +1760,8 @@ def open_app_window(url, size=None):
 
 def close_splash(*_):
     """Close the native splash the .exe shows while it unpacks (PyInstaller --splash)."""
+    if "_PYI_SPLASH_IPC" not in os.environ:
+        return  # no splash (the Mac app has none)
     try:
         import pyi_splash
         pyi_splash.close()
@@ -1795,7 +1812,7 @@ def main():
         info = json.loads((APP_HOME / "server.json").read_text())
         req = urllib.request.Request("http://127.0.0.1:%d/api/focus" % info["port"], data=b"{}",
                                      headers={"X-Token": info["token"], "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=2) as r:
+        with LOCAL.open(req, timeout=2) as r:
             if json.loads(r.read()).get("ok"):
                 close_splash()
                 return
@@ -1807,14 +1824,14 @@ def main():
     if reuse_port:
         for _ in range(40):  # the old version may need a moment to let go of the port
             try:
-                httpd = http.server.ThreadingHTTPServer(("127.0.0.1", reuse_port), make_handler(app))
+                httpd = LocalServer(("127.0.0.1", reuse_port), make_handler(app))
                 if reuse_token:
                     app.token = reuse_token
                 break
             except OSError:
                 time.sleep(0.15)
     if httpd is None:
-        httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), make_handler(app))
+        httpd = LocalServer(("127.0.0.1", 0), make_handler(app))
         reuse_window = False
     httpd.daemon_threads = True
     app.httpd = httpd

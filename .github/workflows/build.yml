@@ -100,7 +100,7 @@ jobs:
           rm -f ~/.rojo-launcher/server.json
           open "$APP"
           "$PY" mac/check.py wait-server
-          sleep 8
+          sleep 20  # long enough that any "allow access" prompt from macOS would be in the picture
           screencapture -x shot-1-window.png || true
           "$PY" mac/check.py state rojo=7.99.0 installed=False banner=True
           "$PY" mac/check.py connected
@@ -109,7 +109,7 @@ jobs:
         run: |
           "$PY" mac/check.py post install
           "$PY" mac/check.py wait-new-server
-          sleep 6
+          sleep 20
           screencapture -x shot-2-moved.png || true
           "$PY" mac/check.py state installed=True banner=False
           codesign --verify --deep --strict "/Applications/Rojo Launcher.app"
