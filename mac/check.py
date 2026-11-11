@@ -58,9 +58,9 @@ def main(cmd, *args):
         wait("the app", lambda: call("/api/ping").get("ok"), 90)
         print("app is up on port", info()["port"])
     elif cmd == "wait-new-server":
-        old = json.loads(LAST.read_text())["token"]
-        wait("a new copy of the app", lambda: info() and info()["token"] != old and call("/api/ping").get("ok"), 90)
-        print("new copy is up on port", info()["port"])
+        old = json.loads(LAST.read_text())["pid"]  # the new copy keeps the port and token, not the pid
+        wait("a new copy of the app", lambda: info() and info().get("pid") != old and call("/api/ping").get("ok"), 90)
+        print("new copy (pid %s) is up on port %s" % (info()["pid"], info()["port"]))
     elif cmd == "state":
         want = dict(a.split("=", 1) for a in args)
 

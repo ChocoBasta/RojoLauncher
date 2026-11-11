@@ -1820,7 +1820,7 @@ def main():
     app.httpd = httpd
     app.port = httpd.server_address[1]
     try:
-        (APP_HOME / "server.json").write_text(json.dumps({"port": app.port, "token": app.token}))
+        (APP_HOME / "server.json").write_text(json.dumps({"port": app.port, "token": app.token, "pid": os.getpid()}))
     except OSError:
         pass
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
