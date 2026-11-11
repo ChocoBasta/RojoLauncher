@@ -5,6 +5,7 @@ Talks to the running app the same way its window does, through ~/.rojo-launcher/
   check.py wait-new-server        wait until a different copy is up (after Move / Update)
   check.py state key=value ...    wait until the app's state has these values
   check.py wait-update            wait until the app has found an update
+  check.py https-ok               the app's update check got through to GitHub (a busy-runner rate limit is fine)
   check.py wait-busy              wait until the app sees something else on Rojo's port
   check.py post <action>          press a button (install, apply_update, ...)
   check.py connected              the window's page is connected to the app
@@ -78,6 +79,12 @@ def main(cmd, *args):
     elif cmd == "wait-update":
         wait("an update", lambda: call("/api/state").get("update"), 45)
         print("update found:", call("/api/state")["update"])
+    elif cmd == "https-ok":
+        wait("the update check", lambda: call("/api/state").get("update_checked"), 45)
+        err = call("/api/state").get("update_error") or ""
+        if any(w in err.lower() for w in ("ssl", "certificate", "urlopen error")):
+            sys.exit("FAILED: the app couldn't reach GitHub over HTTPS: " + err)
+        print("reached GitHub over HTTPS" + (" (GitHub said: %s)" % err if err else ""))
     elif cmd == "wait-busy":
         wait("the app to notice the busy port", lambda: call("/api/state").get("port_busy"), 30)
         print("port busy:", call("/api/state")["port_busy"])

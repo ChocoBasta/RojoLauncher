@@ -123,7 +123,7 @@ jobs:
             for i in $(seq 120); do [ -f ~/.rojo-launcher/server.json ] && break; sleep 0.5; done
             cat boot.log
             "$PY" mac/check.py state version=$VER mac_app=True
-            "$PY" mac/check.py state update_checked=True update_error=None
+            "$PY" mac/check.py https-ok
             kill $pid; wait $pid 2>/dev/null || true
           }
           boot ""
