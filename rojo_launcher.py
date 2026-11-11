@@ -76,6 +76,34 @@ def save_config(cfg):
 
 # ---------------------------------------------------------------- helpers
 
+LOG_PATH = APP_HOME / "launcher.log"   # what the Activity drawer showed, kept after the app closes
+_log_lock = threading.Lock()
+
+
+def log_file(line):
+    try:
+        with _log_lock, open(LOG_PATH, "a", encoding="utf-8") as f:
+            f.write("%s [%d] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), os.getpid(), line))
+    except OSError:
+        pass
+
+
+def start_log_file():
+    """Keep a small log on disk (the last few runs), with any crash in it, for when something goes wrong."""
+    try:
+        APP_HOME.mkdir(parents=True, exist_ok=True)
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > 512 * 1024:
+            LOG_PATH.write_bytes(LOG_PATH.read_bytes()[-128 * 1024:])
+    except OSError:
+        pass
+
+    def crashed(kind, exc_type, exc, tb):
+        import traceback
+        log_file("!! %s crashed:\n%s" % (kind, "".join(traceback.format_exception(exc_type, exc, tb)).rstrip()))
+    sys.excepthook = lambda t, e, tb: crashed("the app", t, e, tb)
+    threading.excepthook = lambda a: crashed("a background task", a.exc_type, a.exc_value, a.exc_traceback)
+    log_file("── Rojo Launcher %s started from %s" % (APP_VERSION, sys.executable if FROZEN else __file__))
+
 def _no_window():
     # Stop a console window flashing up for every command on Windows.
     if sys.platform == "win32":
@@ -812,6 +840,7 @@ class App:
         elif line.startswith("── "):
             kind = "info"
         ev = {"type": "log", "t": time.strftime("%H:%M:%S"), "text": line, "kind": kind}
+        log_file(line)
         with self.lock:
             self.logs.append(ev)
         self.broadcast(ev)
@@ -1303,6 +1332,7 @@ class App:
             env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"  # the new exe must unpack itself, not reuse our temp folder
         extra = ({"creationflags": 0x00000008 | 0x00000200} if sys.platform == "win32"  # detached
                  else {"start_new_session": True})
+        log_file("Reopening: %s" % (cmd[:2] if cmd[:1] == ["/bin/sh"] else cmd))
         try:
             subprocess.Popen(cmd, env=env, cwd=str(APP_HOME), stdin=subprocess.DEVNULL,
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, **extra)
@@ -1314,6 +1344,9 @@ class App:
             except Exception:
                 pass
         self.shutdown()
+        # This copy is done (Rojo is stopped, settings saved): make sure it really goes away,
+        # even if the window doesn't close, so the new one isn't left waiting on it.
+        threading.Timer(4, os._exit, args=(0,)).start()
 
     def toggle_favorite(self, name):
         favs = self.cfg.setdefault("favorites", [])
@@ -1740,6 +1773,7 @@ def mac_window_look(window):
 
 
 def main():
+    start_log_file()
     _fix_path()
     threading.Thread(target=_merge_shell_path, daemon=True).start()
     APP_HOME.mkdir(parents=True, exist_ok=True)
