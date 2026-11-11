@@ -20,12 +20,15 @@ Pick a repo, press **Pull** to get the latest from GitHub, then press **Start** 
 
 ### Mac
 
-1. Download `RojoLauncher-Mac.dmg` and open it.
+1. Download `RojoLauncher-Mac.dmg` from [the latest release](https://github.com/ChocoBasta/RojoLauncher/releases/latest) and open it.
 2. Drag **Rojo Launcher** onto the **Applications** folder next to it.
 3. Open Rojo Launcher from Launchpad, Spotlight or the Applications folder. Right-click its Dock icon and choose **Options → Keep in Dock** if you want it there.
 
 The first time only, the Mac says it can't check the app (it isn't from the App Store or a paid Apple developer account). Click **Done**, then open **System Settings → Privacy & Security**, scroll down and click **Open Anyway** next to Rojo Launcher. Or run this once in Terminal instead:
 `xattr -cr "/Applications/Rojo Launcher.app"`
+
+**Or install (or reinstall) from Terminal**, which skips that warning:
+`osascript -e 'quit app "Rojo Launcher"'; curl -fL https://github.com/ChocoBasta/RojoLauncher/releases/latest/download/RojoLauncher-Mac.zip -o /tmp/rl.zip && rm -rf "/Applications/Rojo Launcher.app" && ditto -x -k /tmp/rl.zip /Applications && open "/Applications/Rojo Launcher.app"`
 
 It runs on Apple Silicon and Intel Macs (macOS 11 or newer) and needs no Python. If you open it straight from the download, it offers to **Move to Applications** itself. It also removes the old "Rojo Launcher" shortcut the Python version made. Updates install in place: press **Update** and it reopens on the new version.
 
