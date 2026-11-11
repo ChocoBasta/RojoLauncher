@@ -1,0 +1,60 @@
+name: Build app
+
+# Builds the Windows .exe and the Mac .app and attaches them to a GitHub Release.
+# Runs when a version tag like v2.0 is pushed, or by hand from the Actions tab.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            file: RojoLauncher-Windows.zip
+          - os: macos-latest
+            file: RojoLauncher-Mac.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyinstaller==6.11.1 pyinstaller-hooks-contrib "pywebview>=5.1,<6"
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "Rojo Launcher" --icon icon.ico --splash splash.png rojo_launcher.py
+          Compress-Archive -Path "dist/Rojo Launcher.exe" -DestinationPath "${{ matrix.file }}"
+
+      - name: Build (Mac)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name "Rojo Launcher" --icon icon.icns \
+            --osx-bundle-identifier local.rojo-launcher rojo_launcher.py
+          cd dist && ditto -c -k --keepParent "Rojo Launcher.app" "../${{ matrix.file }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.file }}
+          path: ${{ matrix.file }}
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            RojoLauncher-Windows.zip
+            RojoLauncher-Mac.zip
