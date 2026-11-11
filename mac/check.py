@@ -11,13 +11,14 @@ Talks to the running app the same way its window does, through ~/.rojo-launcher/
 """
 import json
 import subprocess
+import tempfile
 import sys
 import time
 import urllib.request
 from pathlib import Path
 
 SERVER = Path.home() / ".rojo-launcher" / "server.json"
-LAST = Path("/tmp/rojo-launcher-last-server.json")
+LAST = Path(tempfile.gettempdir()) / "rojo-launcher-last-server.json"
 
 
 def info():

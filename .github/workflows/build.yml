@@ -44,6 +44,21 @@ jobs:
         run: |
           pyinstaller --noconfirm --onefile --windowed --name "Rojo Launcher" --icon icon.ico --splash splash.png rojo_launcher.py
           Compress-Archive -Path "dist/Rojo Launcher.exe" -DestinationPath RojoLauncher-Windows.zip
+      - name: "Test: starts, and updates itself in place"
+        shell: bash
+        run: |
+          VER=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' rojo_launcher.py)
+          cp -r dist installed
+          ROJO_LAUNCHER_HEADLESS=1 ROJO_LAUNCHER_TEST_UPDATE="$PWD/RojoLauncher-Windows.zip" "installed/Rojo Launcher.exe" &
+          python mac/check.py wait-server
+          python mac/check.py state version=$VER platform=win mac_app=False
+          python mac/check.py wait-update
+          python mac/check.py post apply_update
+          python mac/check.py wait-new-server
+          python mac/check.py state version=$VER
+          ls installed
+          cat ~/.rojo-launcher/launcher.log
+          taskkill //F //IM "Rojo Launcher.exe" || true
       - uses: actions/upload-artifact@v4
         with:
           name: RojoLauncher-Windows
