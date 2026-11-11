@@ -51,7 +51,7 @@ Settings are stored in `~/.rojo-launcher.json`.
 
 The app looks for updates in the `ChocoBasta/RojoLauncher` repo (`UPDATE_REPO` near the top of `rojo_launcher.py`).
 
-1. Raise `APP_VERSION` in `rojo_launcher.py` and push it to `main`. Copies running from the Python file update from that file.
-2. Push a tag with the same number, such as `v3.2`. The GitHub Action in `.github/workflows/build.yml` builds the Windows .exe and the Mac app with PyInstaller and attaches them to a Release (`RojoLauncher-Windows.zip`, `RojoLauncher-Mac.dmg`, and `RojoLauncher-Mac.zip`, which the Mac app updates from). The .exe and the Mac app update from the latest Release.
+1. Raise `APP_VERSION` in `rojo_launcher.py` and push it to `main`. That's all.
+2. The GitHub Action in `.github/workflows/build.yml` builds the Windows .exe and the Mac app with PyInstaller, tests them, and publishes Release `v<version>` (`RojoLauncher-Windows.zip`, `RojoLauncher-Mac.dmg`, and `RojoLauncher-Mac.zip`, which the Mac app updates from). Every copy of the app then shows **Update**. Copies running from the Python file update from `rojo_launcher.py` on `main`. Pushes that don't change the version are only built and tested.
 
 The Mac build runs on GitHub's Mac machines: a universal app (Apple Silicon + Intel) from python.org's Python, signed ad hoc (free, no Apple account), with the icon from `mac/icon.png` (drawn by `mac/make_icon.py` on Apple's icon grid). Before it packs the `.dmg`, it opens the app for real and checks it starts on both chip types, finds `rojo` through your shell's PATH, opens its window, frees a busy port, moves itself to Applications and updates itself in place (`mac/check.py`). If a test fails, no Release is made.
